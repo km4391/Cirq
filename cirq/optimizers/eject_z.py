@@ -71,10 +71,23 @@ class EjectZ():
             """Zeroes qubit_phase entries by emitting Z gates."""
             for q in qubits:
                 p = qubit_phase[q]
-                if not decompositions.is_negligible_turn(p, self.tolerance):
+                qubit_phase[q] = 0
+                if decompositions.is_negligible_turn(p, self.tolerance):
+                    continue
+                moment_index = circuit.prev_moment_operating_on([q])
+                for op in circuit.moments[moment_index]:
+                    if q in op.qubits and isinstance(op.gate, ops.PhasedXZGate):
+                        # Attach z-rotation to last PhasedXZ gate.
+                        gate, qubit = op.gate, op.qubits[0]
+                        old_new_op = op.gate.with_z_exponent(0).on(qubit)
+                        new_new_op = op.gate.with_z_exponent(p * 2).on(qubit)
+                        inline_intos.remove((moment_index, old_new_op))
+                        inline_intos.append((moment_index, new_new_op))
+                        break
+                else:
+                    # Add a new Z gate
                     dump_op = ops.Z(q)**(p * 2)
                     insertions.append((index, dump_op))
-                qubit_phase[q] = 0
 
         deletions: List[Tuple[int, ops.Operation]] = []
         inline_intos: List[Tuple[int, ops.Operation]] = []
@@ -96,8 +109,9 @@ class EjectZ():
 
                 # If there's no tracked phase, we can move on.
                 phases = [qubit_phase[q] for q in op.qubits]
-                if all(decompositions.is_negligible_turn(p, self.tolerance)
-                       for p in phases):
+                if (not isinstance(op.gate, ops.PhasedXZGate) and all(
+                        decompositions.is_negligible_turn(p, self.tolerance)
+                        for p in phases)):
                     continue
 
                 if _is_swaplike(op):
@@ -106,7 +120,6 @@ class EjectZ():
                         b], qubit_phase[a]
                     continue
 
-
                 # Try to move the tracked phasing over the operation.
                 phased_op = op
                 for i, p in enumerate(phases):
@@ -114,6 +127,13 @@ class EjectZ():
                         phased_op = protocols.phase_by(phased_op, -p, i,
                                                        default=None)
                 if phased_op is not None:
+                    gate = phased_op.gate
+                    if (isinstance(gate, ops.PhasedXZGate) and
+                        (self.eject_parameterized or
+                         not protocols.is_parameterized(gate.z_exponent))):
+                        gate, qubit = phased_op.gate, phased_op.qubits[0]
+                        qubit_phase[qubit] += gate.z_exponent / 2
+                        phased_op = gate.with_z_exponent(0).on(qubit)
                     deletions.append((moment_index, op))
                     inline_intos.append((moment_index,
                                      cast(ops.Operation, phased_op)))
